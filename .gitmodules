@@ -1,0 +1,3 @@
+[submodule "glomar/chacha20"]
+	path = glomar/chacha20
+	url = https://github.com/bahorn/chacha20.git
