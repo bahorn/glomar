@@ -53,3 +53,8 @@ python3 glomar get finished magic
 
 ChaCha20 to encrypt data.
 Each block has a sha256 hmac, which is how valid blocks are identified.
+
+
+## License
+
+MIT
