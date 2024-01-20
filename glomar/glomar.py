@@ -22,9 +22,6 @@ KEY_SIZE = 32
 NONCE_SIZE = 8
 # Size of the meta data we include in each encrypted block
 BLOCK_HEADER_SIZE = 8
-# Actual size of each block
-KB = 1024
-BLOCK_SIZE = 4 * KB
 
 
 def block_data_size(block_size):
