@@ -4,10 +4,14 @@ import sys
 from glomar import GlomarStore, CreateGlomarStore
 
 
+KB = 1024
+DEFAULT_BLOCK_SIZE = 4 * KB
+
+
 class GlomarCLI:
     @staticmethod
-    def create(file, n_blocks):
-        cbs = CreateGlomarStore(n_blocks)
+    def create(file, n_blocks, block_size):
+        cbs = CreateGlomarStore(n_blocks, block_size=block_size)
         with open(file, 'wb') as f:
             pickle.dump(cbs, f)
 
@@ -23,9 +27,9 @@ class GlomarCLI:
             pickle.dump(store, f)
 
     @staticmethod
-    def get(store_file, key):
+    def get(store_file, key, block_size):
         with open(store_file, 'rb') as f:
-            store = GlomarStore(f.read())
+            store = GlomarStore(f.read(), block_size=block_size)
         res = store.get(bytes(key, 'utf-8'))
         if res:
             sys.stdout.buffer.write(res)
@@ -44,7 +48,8 @@ def main():
     # Create a store
     create_p = subparsers.add_parser('create')
     create_p.add_argument('file')
-    create_p.add_argument('--n_blocks', type=int, default=1000)
+    create_p.add_argument('--n-blocks', type=int, default=1000)
+    create_p.add_argument('--block-size', type=int, default=DEFAULT_BLOCK_SIZE)
     # Add a file to a store
     add_p = subparsers.add_parser('add')
     add_p.add_argument('store_file')
@@ -58,18 +63,19 @@ def main():
     get_p = subparsers.add_parser('get')
     get_p.add_argument('store_file')
     get_p.add_argument('key')
+    get_p.add_argument('--block-size', type=int, default=DEFAULT_BLOCK_SIZE)
 
     args = parser.parse_args()
 
     match args.command:
         case 'create':
-            GlomarCLI.create(args.file, args.n_blocks)
+            GlomarCLI.create(args.file, args.n_blocks, args.block_size)
         case 'add':
             GlomarCLI.add(args.store_file, args.key, args.file)
         case 'pack':
             GlomarCLI.pack(args.store_file, args.out_file)
         case 'get':
-            GlomarCLI.get(args.store_file, args.key)
+            GlomarCLI.get(args.store_file, args.key, args.block_size)
         case _:
             pass
 

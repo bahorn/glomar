@@ -15,7 +15,7 @@ from chacha20 import ChaCha20
 from hashlib import sha256
 
 # Size of the MAC
-MAC_SIZE = 32
+MAC_SIZE = hmac.new(b'', digestmod=sha256).digest_size
 # Key Size for the stream cipher
 KEY_SIZE = 32
 # Nonce size
@@ -25,8 +25,14 @@ BLOCK_HEADER_SIZE = 8
 # Actual size of each block
 KB = 1024
 BLOCK_SIZE = 4 * KB
-BLOCK_DATA_SIZE = BLOCK_SIZE - MAC_SIZE
-USABLE_SIZE = BLOCK_DATA_SIZE - BLOCK_HEADER_SIZE
+
+
+def block_data_size(block_size):
+    return block_size - MAC_SIZE
+
+
+def usable_size(block_size):
+    return block_data_size(block_size) - BLOCK_HEADER_SIZE
 
 
 # Modern Fisher-Yates
@@ -57,21 +63,22 @@ class WeirdState(Exception):
 
 
 class Block:
-    def __init__(self, idx, data):
+    def __init__(self, idx, data, block_size):
         self._data = data
         self._idx = idx
+        self._block_size = block_size
 
     def idx(self):
         return self._idx
 
     def __bytes__(self):
-        assert len(self._data) == BLOCK_SIZE
+        assert len(self._data) == self._block_size
         return self._data
 
 
 class RandomBlock(Block):
-    def __init__(self, idx):
-        super().__init__(idx, secrets.token_bytes(BLOCK_SIZE))
+    def __init__(self, idx, block_size):
+        super().__init__(idx, secrets.token_bytes(block_size), block_size)
 
 
 def hmac_block(key, idx, data):
@@ -82,32 +89,37 @@ def hmac_block(key, idx, data):
 
 
 class MACBlock(Block):
-    def __init__(self, idx, data, key):
-        if len(data) != BLOCK_DATA_SIZE:
+    def __init__(self, idx, data, key, block_size):
+        if len(data) != block_data_size(block_size):
             raise InvalidSize()
         self._body = data
         self._mac = hmac_block(key, idx, data)
-        super().__init__(idx, self._body + self._mac)
+        super().__init__(idx, self._body + self._mac, block_size)
 
 
 class NonceBlock(MACBlock):
-    def __init__(self, idx, key, data=None):
+    def __init__(self, idx, key, block_size, data=None):
         body = data
         if data is None:
-            body = secrets.token_bytes(BLOCK_DATA_SIZE)
+            body = secrets.token_bytes(block_data_size(block_size))
 
-        super().__init__(idx, body, key)
+        super().__init__(idx, body, key, block_size)
 
     def get_nonce(self):
         return sha256(self._body).digest()[:NONCE_SIZE]
 
 
-def macblock_to_data(block):
-    return bytes(block)[:BLOCK_DATA_SIZE]
+def macblock_to_data(block, block_size):
+    return bytes(block)[:block_data_size(block_size)]
 
 
-def block_to_nonceblock(block, key):
-    return NonceBlock(block.idx(), key, data=macblock_to_data(block))
+def block_to_nonceblock(block, key, block_size):
+    return NonceBlock(
+        block.idx(),
+        key,
+        block_size,
+        data=macblock_to_data(block, block_size)
+    )
 
 
 def derive_keys(base_key):
@@ -137,28 +149,30 @@ def pad(data, length):
     return data + secrets.token_bytes(length - len(data))
 
 
-def add_header_to_block(data):
+def add_header_to_block(data, block_size):
     """
     Adds the header struct to the block.
     """
-    if len(data) > USABLE_SIZE:
+    if len(data) > usable_size(block_size):
         raise InvalidSize()
-    return pad(struct.pack('>Q', len(data)) + data, BLOCK_DATA_SIZE)
+    return pad(
+        struct.pack('>Q', len(data)) + data, block_data_size(block_size)
+    )
 
 
 def remove_header(data):
-    dlen = struct.unpack('>Q', data[:8])[0]
-    return data[8:8 + dlen]
+    dlen = struct.unpack('>Q', data[:BLOCK_HEADER_SIZE])[0]
+    return data[BLOCK_HEADER_SIZE:BLOCK_HEADER_SIZE + dlen]
 
 
-def validate_block(key, block):
+def validate_block(key, block, block_size):
     """
     Check if a block can be decrypted with the key
     """
     assert isinstance(block, Block)
     brep = bytes(block)
-    data = brep[:BLOCK_DATA_SIZE]
-    mac = brep[BLOCK_DATA_SIZE:]
+    data = brep[:block_data_size(block_size)]
+    mac = brep[block_data_size(block_size):]
     assert len(mac) == MAC_SIZE
 
     digest = hmac_block(key, block.idx(), data)
@@ -167,7 +181,8 @@ def validate_block(key, block):
 
 class CreateGlomarStore:
 
-    def __init__(self, n_blocks, ratio_start=0.1):
+    def __init__(self, n_blocks, block_size):
+        self._block_size = block_size
         self._n_blocks = n_blocks
         self._streams = []
         # Shuffle it once
@@ -178,7 +193,7 @@ class CreateGlomarStore:
         Add data to the store
         """
         res = []
-        all_chunks = list(chunks(data, USABLE_SIZE))
+        all_chunks = list(chunks(data, usable_size(self._block_size)))
         # +1 for the Nonce block
         positions = sorted(self._locations[:len(all_chunks) + 1])
         self._locations = self._locations[len(all_chunks) + 1:]
@@ -187,7 +202,9 @@ class CreateGlomarStore:
         nonce_hmac_key, hmac_key, stream_key = derive_keys(key)
 
         # Get the Nonce block
-        stream_nonce_block = NonceBlock(positions[0], nonce_hmac_key)
+        stream_nonce_block = NonceBlock(
+            positions[0], nonce_hmac_key, self._block_size
+        )
         stream_nonce = stream_nonce_block.get_nonce()
 
         c = ChaCha20(key=stream_key, nonce=stream_nonce, counter=0)
@@ -197,9 +214,12 @@ class CreateGlomarStore:
         for idx, chunk in enumerate(all_chunks):
             nidx = idx + 1
             loc = positions[nidx]
-            block = add_header_to_block(chunk)
+            block = add_header_to_block(chunk, self._block_size)
             encrypted = c.encrypt(block)
-            res.append((loc, MACBlock(loc, encrypted, hmac_key)))
+            block = MACBlock(
+                loc, encrypted, hmac_key, self._block_size
+            )
+            res.append((loc, block))
 
         self._streams.append(res)
 
@@ -214,7 +234,7 @@ class CreateGlomarStore:
         for idx in self._locations:
             if res[idx] is not None:
                 raise WeirdState()
-            res[idx] = RandomBlock(idx)
+            res[idx] = RandomBlock(idx, self._block_size)
 
         if None in res:
             raise WeirdState()
@@ -224,9 +244,12 @@ class CreateGlomarStore:
 
 class GlomarStore:
 
-    def __init__(self, data):
-        loop = enumerate(chunks(data, BLOCK_SIZE))
-        self._state = list(map(lambda x: Block(x[0], x[1]), loop))
+    def __init__(self, data, block_size):
+        self._block_size = block_size
+        loop = enumerate(chunks(data, self._block_size))
+        self._state = list(
+            map(lambda x: Block(x[0], x[1], self._block_size), loop)
+        )
 
     def get(self, key):
         nonce_hmac_key, hmac_key, stream_key = derive_keys(key)
@@ -234,8 +257,10 @@ class GlomarStore:
         # Lets find the Nonce block
         nonce_block = None
         for idx, block in enumerate(self._state):
-            if validate_block(nonce_hmac_key, block):
-                nonce_block = block_to_nonceblock(block, nonce_hmac_key)
+            if validate_block(nonce_hmac_key, block, self._block_size):
+                nonce_block = block_to_nonceblock(
+                    block, nonce_hmac_key, self._block_size
+                )
                 break
 
         if not nonce_block:
@@ -244,8 +269,8 @@ class GlomarStore:
         # Now we need to identify the remaining blocks
         blocks = []
         for block in self._state:
-            if validate_block(hmac_key, block):
-                blocks.append(macblock_to_data(block))
+            if validate_block(hmac_key, block, self._block_size):
+                blocks.append(macblock_to_data(block, self._block_size))
 
         stream_nonce = nonce_block.get_nonce()
         c = ChaCha20(key=stream_key, nonce=stream_nonce, counter=0)
